@@ -271,3 +271,12 @@ footer {
     padding: 25px;
   }
 }
+.event-search {
+  width: 100%;
+  max-width: 420px;
+  margin: 0 0 24px;
+  padding: 12px 14px;
+  border: 1px solid #dfe1ec;
+  border-radius: 9px;
+  font: inherit;
+}

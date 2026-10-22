@@ -6,6 +6,7 @@ import "./App.css";
 const API = "http://localhost:5000/api/v1";
 
 function AppContent() {
+  const [search, setSearch] = useState("");
   const [user, setUser] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("eventhubUser")) || null;
@@ -155,6 +156,32 @@ function AppContent() {
               <p>Discover technology conferences, live music, and inspiring workshops.</p>
             </section>
             <h2>Upcoming Events</h2>
+            
+<h2>Upcoming Events</h2>
+
+<input
+  type="search"
+  className="event-search"
+  placeholder="Search events by title..."
+  value={search}
+  onChange={(e) => setSearch(e.target.value)}
+  aria-label="Search events by title"
+/>
+
+<div className="event-grid">
+  {events
+    .filter((event) =>
+      event.title.toLowerCase().includes(search.toLowerCase())
+    )
+    .map((event) => (
+      <EventCard
+        key={event._id}
+        event={event}
+        onBook={book}
+      />
+    ))}
+</div>
+
             <div className="event-grid">
               {events.map(event => (
                 <article className="event-card" key={event._id}>
@@ -251,6 +278,31 @@ function Organizer({ token }) {
         {summary.events.map(event => <p key={event._id}>{event.title} — {event.ticketsAvailable} tickets left</p>)}
       </>}
     </main>
+  );
+}
+
+function EventCard({ event, onBook }) {
+  return (
+    <article className="event-card">
+      <div className="event-banner">{event.category}</div>
+
+      <div className="event-body">
+        <p className="event-date">
+          {new Date(event.date).toLocaleDateString()}
+        </p>
+
+        <h3>{event.title}</h3>
+        <p>📍 {event.venue}</p>
+        <p>{event.ticketsAvailable} tickets available</p>
+
+        <button
+          disabled={event.ticketsAvailable < 1}
+          onClick={() => onBook(event._id)}
+        >
+          {event.ticketsAvailable < 1 ? "Sold Out" : "Book Tickets"}
+        </button>
+      </div>
+    </article>
   );
 }
 

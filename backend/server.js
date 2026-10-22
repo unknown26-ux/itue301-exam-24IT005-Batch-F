@@ -1,157 +1,357 @@
 
+
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const mongoose = require("mongoose");
+
+const Attendee = require("./models/Attendee");
+const Event = require("./models/Event");
+const Ticket = require("./models/Ticket");
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
 const PORT = process.env.PORT || 5000;
-const SECRET = process.env.JWT_SECRET || "eventhub_dev_secret";
+const SECRET = process.env.JWT_SECRET;
 
-let events = [
-  { _id: "1", title: "Tech Conference 2026", category: "Technology", date: "2026-11-15", venue: "Ahmedabad", ticketsAvailable: 100 },
-  { _id: "2", title: "Music Night", category: "Music", date: "2026-11-20", venue: "Vadodara", ticketsAvailable: 50 },
-  { _id: "3", title: "AI Workshop", category: "Education", date: "2026-11-25", venue: "Surat", ticketsAvailable: 30 }
-];
+app.use(cors());
 
-let tickets = [];
-let nextTicketId = 1;
+// Log every request, including requests with invalid JSON.
+function requestLogger(req, res, next) {
+  console.log(
+    `[${req.method}] [${req.path}] [${new Date().toISOString()}]`
+  );
+  next();
+}
+
+app.use(requestLogger);
+app.use(express.json());
 
 function authGuard(req, res, next) {
   const header = req.headers.authorization;
 
   if (!header || !header.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Please log in first" });
+    return res.status(401).json({
+      success: false,
+      message: "Bearer token is required"
+    });
   }
 
   try {
     req.user = jwt.verify(header.split(" ")[1], SECRET);
     next();
-  } catch {
-    return res.status(401).json({ message: "Invalid or expired token" });
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid or expired token"
+    });
   }
 }
 
-app.get("/", (req, res) => {
-  res.json({ message: "EventHub API is running" });
+// Public API: login
+app.post("/api/v1/auth/login", async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required"
+      });
+    }
+
+    const attendee = await Attendee.findOne({
+      email: email.toLowerCase().trim()
+    });
+
+    if (
+      !attendee ||
+      !(await bcrypt.compare(password, attendee.password))
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password"
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        id: attendee._id.toString(),
+        email: attendee.email,
+        name: attendee.name,
+        role: attendee.role
+      },
+      SECRET,
+      { expiresIn: "2h" }
+    );
+
+    res.status(200).json({
+      success: true,
+      token,
+      role: attendee.role,
+      attendee: {
+        id: attendee._id,
+        name: attendee.name,
+        email: attendee.email
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post("/api/v1/auth/login", (req, res) => {
-  const { email, password } = req.body;
-
-  const users = [
-    { id: "u1", name: "Demo Attendee", email: "attendee@example.com", password: "demo123", role: "attendee" },
-    { id: "u2", name: "Demo Organizer", email: "organizer@example.com", password: "demo123", role: "organizer" }
-  ];
-
-  const user = users.find(
-    u => u.email === email && u.password === password
-  );
-
-  if (!user) {
-    return res.status(401).json({ message: "Invalid email or password" });
+// Public API: list events
+app.get("/api/v1/events", async (req, res, next) => {
+  try {
+    const events = await Event.find().sort({ date: 1 });
+    res.status(200).json(events);
+  } catch (error) {
+    next(error);
   }
-
-  const token = jwt.sign(
-    { id: user.id, email: user.email, role: user.role, name: user.name },
-    SECRET,
-    { expiresIn: "2h" }
-  );
-
-  res.json({
-    token,
-    role: user.role,
-    attendee: { id: user.id, name: user.name, email: user.email }
-  });
 });
 
-app.get("/api/v1/events", (req, res) => {
-  res.json(events);
+// Protected API: book tickets
+app.post("/api/v1/tickets", authGuard, async (req, res, next) => {
+  try {
+    const { eventId, quantity } = req.body;
+
+    if (
+      !mongoose.isValidObjectId(eventId) ||
+      !Number.isInteger(quantity) ||
+      quantity < 1
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide a valid eventId and positive whole-number quantity"
+      });
+    }
+
+    // Atomically reserve available tickets so stock cannot go negative.
+    const event = await Event.findOneAndUpdate(
+      {
+        _id: eventId,
+        ticketsAvailable: { $gte: quantity }
+      },
+      {
+        $inc: { ticketsAvailable: -quantity }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!event) {
+      const exists = await Event.exists({ _id: eventId });
+
+      return res.status(exists ? 400 : 404).json({
+        success: false,
+        message: exists
+          ? "Not enough tickets available"
+          : "Event not found"
+      });
+    }
+
+    try {
+      const ticket = await Ticket.create({
+        attendeeId: req.user.id,
+        eventId: event._id,
+        quantity
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: "Tickets booked successfully",
+        ticket
+      });
+    } catch (error) {
+      // Restore stock if the ticket document could not be saved.
+      await Event.updateOne(
+        { _id: event._id },
+        { $inc: { ticketsAvailable: quantity } }
+      );
+      throw error;
+    }
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post("/api/v1/tickets", authGuard, (req, res) => {
-  const { eventId, quantity } = req.body;
-  const amount = Number(quantity);
+// Protected API: only the logged-in attendee's tickets
+app.get("/api/v1/tickets/my", authGuard, async (req, res, next) => {
+  try {
+    const tickets = await Ticket.find({
+      attendeeId: req.user.id
+    })
+      .populate("attendeeId", "name email")
+      .populate("eventId", "title date venue");
 
-  if (!Number.isInteger(amount) || amount < 1) {
-    return res.status(400).json({ message: "Quantity must be a positive integer" });
+    res.status(200).json(tickets);
+  } catch (error) {
+    next(error);
   }
-
-  const event = events.find(e => e._id === String(eventId));
-
-  if (!event) {
-    return res.status(404).json({ message: "Event not found" });
-  }
-
-  if (event.ticketsAvailable < amount) {
-    return res.status(400).json({ message: "Not enough tickets available" });
-  }
-
-  event.ticketsAvailable -= amount;
-
-  const ticket = {
-    _id: String(nextTicketId++),
-    attendeeId: req.user.id,
-    attendeeName: req.user.name,
-    eventId: event._id,
-    eventTitle: event.title,
-    quantity: amount,
-    bookingDate: new Date().toISOString(),
-    status: "booked"
-  };
-
-  tickets.push(ticket);
-  res.status(201).json({ message: "Tickets booked successfully", ticket });
 });
 
-app.get("/api/v1/tickets/my", authGuard, (req, res) => {
-  res.json(tickets.filter(t => t.attendeeId === req.user.id));
-});
+// Protected API: update ticket status
+app.patch(
+  "/api/v1/tickets/:id/status",
+  authGuard,
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
 
-app.patch("/api/v1/tickets/:id/status", authGuard, (req, res) => {
-  const ticket = tickets.find(t => t._id === req.params.id);
+      if (!mongoose.isValidObjectId(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid ticket ID"
+        });
+      }
 
-  if (!ticket || ticket.attendeeId !== req.user.id) {
-    return res.status(404).json({ message: "Ticket not found" });
+      if (!["cancelled", "used"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Status must be cancelled or used"
+        });
+      }
+
+      const ticket = await Ticket.findOne({
+        _id: id,
+        attendeeId: req.user.id
+      });
+
+      if (!ticket) {
+        return res.status(404).json({
+          success: false,
+          message: "Ticket not found"
+        });
+      }
+
+      if (ticket.status !== "booked") {
+        return res.status(400).json({
+          success: false,
+          message: "Only booked tickets can be updated"
+        });
+      }
+
+      if (status === "cancelled") {
+        // Restore inventory only when cancellation is successful.
+        const updated = await Ticket.findOneAndUpdate(
+          { _id: id, attendeeId: req.user.id, status: "booked" },
+          { $set: { status: "cancelled" } },
+          { new: true, runValidators: true }
+        );
+
+        if (!updated) {
+          return res.status(400).json({
+            success: false,
+            message: "Ticket status has already changed"
+          });
+        }
+
+        await Event.updateOne(
+          { _id: ticket.eventId },
+          { $inc: { ticketsAvailable: ticket.quantity } }
+        );
+
+        return res.status(200).json({
+          success: true,
+          message: "Ticket cancelled",
+          ticket: updated
+        });
+      }
+
+      ticket.status = "used";
+      await ticket.save();
+
+      res.status(200).json({
+        success: true,
+        message: "Ticket marked as used",
+        ticket
+      });
+    } catch (error) {
+      next(error);
+    }
   }
+);
 
-  if (ticket.status !== "booked") {
-    return res.status(400).json({ message: "Ticket is already cancelled or used" });
+// Protected organizer summary, used by the existing React dashboard.
+app.get(
+  "/api/v1/organizer/summary",
+  authGuard,
+  async (req, res, next) => {
+    try {
+      if (req.user.role !== "organizer") {
+        return res.status(403).json({
+          success: false,
+          message: "Organizer access required"
+        });
+      }
+
+      const [totalEvents, totalBookings, events] = await Promise.all([
+        Event.countDocuments(),
+        Ticket.countDocuments({ status: "booked" }),
+        Event.find().sort({ date: 1 })
+      ]);
+
+      res.status(200).json({ totalEvents, totalBookings, events });
+    } catch (error) {
+      next(error);
+    }
   }
+);
 
-  if (req.body.status !== "cancelled") {
-    return res.status(400).json({ message: "Only cancellation is supported" });
-  }
-
-  ticket.status = "cancelled";
-  const event = events.find(e => e._id === ticket.eventId);
-  if (event) event.ticketsAvailable += ticket.quantity;
-
-  res.json({ message: "Ticket cancelled", ticket });
-});
-
-app.get("/api/v1/organizer/summary", authGuard, (req, res) => {
-  if (req.user.role !== "organizer") {
-    return res.status(403).json({ message: "Organizer access required" });
-  }
-
-  res.json({
-    totalEvents: events.length,
-    totalBookings: tickets.filter(t => t.status === "booked").length,
-    events
-  });
-});
-
+// Global error handler: must be the final middleware.
 app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ message: "Internal server error" });
+  console.error(err.message);
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  if (err.name === "ValidationError" || err.name === "CastError") {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid data",
+      details: err.message
+    });
+  }
+
+  if (err.code === 11000) {
+    return res.status(400).json({
+      success: false,
+      message: "A record with this unique value already exists"
+    });
+  }
+
+  if (err instanceof SyntaxError && err.status === 400) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid JSON request body"
+    });
+  }
+
+  res.status(500).json({
+    success: false,
+    message: "Internal server error"
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`EventHub API running at http://localhost:${PORT}`);
+// Start the API only after Atlas connects successfully.
+async function startServer() {
+  if (!SECRET) {
+    throw new Error("JWT_SECRET is missing from backend/.env");
+  }
+
+  await mongoose.connect(process.env.MONGO_URI);
+  console.log("Connected to MongoDB Atlas");
+
+  app.listen(PORT, () => {
+    console.log(`EventHub API running at http://localhost:${PORT}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start EventHub:", error.message);
+  process.exit(1);
 });
