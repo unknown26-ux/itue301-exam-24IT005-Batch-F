@@ -224,7 +224,8 @@ function AppContent() {
             <div className="event-grid">
               {tickets.map(ticket => (
                 <article className="event-card event-body" key={ticket._id}>
-                  <h3>{ticket.eventTitle}</h3>
+                 <h3>{ticket.eventId?.title || "Event unavailable"}</h3>
+<p>Event venue: {ticket.eventId?.venue || "Venue unavailable"}</p>
                   <p>Quantity: {ticket.quantity}</p>
                   <p>Status: <strong>{ticket.status}</strong></p>
                   <p>Booked: {new Date(ticket.bookingDate).toLocaleString()}</p>
